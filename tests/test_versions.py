@@ -16,8 +16,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 EXPECTED = {
-    "suite": "1.3.3",
-    "wavelink": "1.1.0",
+    "suite": "1.3.4",
+    "wavelink": "1.1.1",
     "hd60": "1.1.0",
     "driver": "0.1",
     "streamcontroller": "1.1.0",

@@ -284,6 +284,7 @@ class AudioEngine:
         playback: str,
         *,
         capture_from_sink: bool = True,
+        wake_playback: bool = False,
     ) -> list[str]:
         # stream.capture.sink=true: capture from a sink's monitor ports.
         # node.dont-reconnect + target.object: stop WirePlumber/Easy Effects
@@ -315,6 +316,15 @@ class AudioEngine:
                 f'target.object="{capture}" node.dont-reconnect=true }}'
             )
             cmd.extend(["-i", props])
+        # Lock the playback side too. Without this, WirePlumber puts the
+        # monitor mix back on the previous headset and the new speakers stay silent.
+        playback_props = (
+            "{ "
+            f'target.object="{playback}" node.dont-reconnect=true'
+            + (" node.passive=false" if wake_playback else "")
+            + " }"
+        )
+        cmd.extend(["-o", playback_props])
         return cmd
 
     def _spawn_loopback(
@@ -325,6 +335,7 @@ class AudioEngine:
         *,
         capture_from_sink: bool = True,
         playback_as_source: bool = False,
+        wake_playback: bool = False,
         source_description: str = "WaveLink Microphone",
     ) -> None:
         if playback_as_source:
@@ -356,7 +367,11 @@ class AudioEngine:
             ]
         else:
             cmd = self._loopback_cmd(
-                name, capture, playback, capture_from_sink=capture_from_sink
+                name,
+                capture,
+                playback,
+                capture_from_sink=capture_from_sink,
+                wake_playback=wake_playback,
             )
         proc = subprocess.Popen(
             cmd,
@@ -420,6 +435,7 @@ class AudioEngine:
                     MONITOR_SINK,
                     out,
                     capture_from_sink=True,
+                    wake_playback=True,
                 )
 
         time.sleep(0.45)
@@ -427,6 +443,8 @@ class AudioEngine:
         self.pin_mic_capture()
         self.pin_discord_to_clean_mic()
         self._silence_usb_mic_headphones()
+        self.pin_monitor_output()
+        self._open_monitor_sink()
 
     def _snapshot_links(self) -> set[tuple[str, str]] | None:
         out = _run(["pw-link", "-l"], timeout=1.5)
@@ -526,7 +544,53 @@ class AudioEngine:
         self.pin_mic_capture()
         self.pin_discord_to_clean_mic()
         self._silence_usb_mic_headphones()
+        self.pin_monitor_output()
         self.apply_assignments()
+
+    def pin_monitor_output(self) -> None:
+        """Keep the monitor mix on the selected speakers, not the previous headset."""
+        out = self.settings.get("monitor_device") or ""
+        if not out or out in {MONITOR_SINK, STREAM_SINK, MIC_CHANNEL.sink_name}:
+            return
+        if "quadcast" in out.lower():
+            return
+        links = self._snapshot_links()
+        src_ports = {
+            f"output.wavelink_monitor_to_hw:output_{ch}" for ch in ("FL", "FR")
+        }
+        if links is not None:
+            for src, dst in list(links):
+                if src not in src_ports:
+                    continue
+                ch = src.rsplit("_", 1)[-1]
+                if dst != f"{out}:playback_{ch}":
+                    self._drop_link(src, dst, links)
+        for ch in ("FL", "FR"):
+            self._ensure_link(
+                f"output.wavelink_monitor_to_hw:output_{ch}",
+                f"{out}:playback_{ch}",
+                links,
+            )
+
+    def _open_monitor_sink(self) -> None:
+        """Unmute the chosen output and lift a near-silent hardware volume.
+
+        The onboard codec was sitting at 40% (~−24 dB). The same mix that is
+        loud on the headset then arrives at the speakers as silence.
+        """
+        name = self.settings.get("monitor_device") or ""
+        sink = self.sink_by_name(name) if name else None
+        if sink is None:
+            return
+        try:
+            with self._pulse_lock:
+                if sink.mute:
+                    self.pulse.mute(sink, False)
+                vol = max((float(v) for v in sink.volume.values), default=0.0)
+                if vol < 0.55:
+                    self.pulse.volume_set_all_chans(sink, 1.0)
+        except Exception:
+            pass
 
     def _disable_hardware_mic_monitor(self) -> None:
         """Mute USB-mic sidetone + headphone jack playback (never capture)."""
